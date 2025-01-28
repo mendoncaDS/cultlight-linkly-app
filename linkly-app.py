@@ -12,23 +12,29 @@ API_KEY = os.getenv("API_KEY")
 WORKSPACE_ID = os.getenv("WORKSPACE_ID")
 BASE_URL = "https://app.linklyhq.com/api/v1"
 
-# Função para buscar todos os links rastreados
-def fetch_tracked_links():
-    endpoint = f"{BASE_URL}/workspace/{WORKSPACE_ID}/links/export"
-    params = {
-        "api_key": API_KEY
-    }
 
+# ------------------------------------------------------------------------------
+#                               FUNÇÕES DE API
+# ------------------------------------------------------------------------------
+def fetch_tracked_links():
+    """
+    Busca todos os links rastreados.
+    """
+    endpoint = f"{BASE_URL}/workspace/{WORKSPACE_ID}/links/export"
+    params = {"api_key": API_KEY}
     try:
         response = requests.get(endpoint, params=params, timeout=10)
-        response.raise_for_status()  # Levanta uma exceção para erros HTTP
+        response.raise_for_status()
         return response.json()
     except requests.exceptions.RequestException as e:
         st.error(f"Erro ao buscar links rastreados: {e}")
         return []
 
-# Função para buscar cliques de um link em um intervalo de datas
+
 def fetch_clicks_for_link(link_id, start_date, end_date):
+    """
+    Busca cliques diários (tráfego) para um link em um intervalo de datas.
+    """
     endpoint = f"{BASE_URL}/workspace/{WORKSPACE_ID}/clicks"
     params = {
         "api_key": API_KEY,
@@ -37,7 +43,6 @@ def fetch_clicks_for_link(link_id, start_date, end_date):
         "end": end_date,
         "workspace_id": WORKSPACE_ID
     }
-
     try:
         response = requests.get(endpoint, params=params, timeout=10)
         response.raise_for_status()
@@ -46,179 +51,170 @@ def fetch_clicks_for_link(link_id, start_date, end_date):
         st.error(f"Erro ao buscar análises para o link ID {link_id}: {e}")
         return []
 
-# Função para inicializar o estado da sessão com todos os dados
+
+# ------------------------------------------------------------------------------
+#                           FUNÇÕES AUXILIARES
+# ------------------------------------------------------------------------------
 def initialize_session_state():
+    """
+    Inicializa o estado da sessão (tracked_links e analytics_data).
+    Só é buscado uma vez para evitar re-buscar desnecessariamente.
+    """
     if "tracked_links" not in st.session_state:
-        with st.spinner("Carregando dados... Isso pode levar alguns instantes na primeira vez."):
+        with st.spinner("Carregando dados dos links..."):
             st.session_state.tracked_links = fetch_tracked_links()
 
     if "analytics_data" not in st.session_state:
-        st.session_state.analytics_data = {}
-        with st.spinner("Carregando análises... Isso pode levar alguns instantes na primeira vez."):
+        with st.spinner("Carregando dados de cliques..."):
+            st.session_state.analytics_data = {}
+
+            # Em vez de 1 ano, vamos pegar 10 anos atrás,
+            # para garantir um histórico bem amplo.
+            dez_anos_atras = (datetime.now() - timedelta(days=3650)).strftime("%Y-%m-%d")
+            hoje = datetime.now().strftime("%Y-%m-%d")
+
             for link in st.session_state.tracked_links:
                 link_id = link["id"]
-                # Busca análises para o último ano (ou um intervalo razoável)
-                start_date = (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d")
-                end_date = datetime.now().strftime("%Y-%m-%d")
-                st.session_state.analytics_data[link_id] = fetch_clicks_for_link(link_id, start_date, end_date)
+                st.session_state.analytics_data[link_id] = fetch_clicks_for_link(
+                    link_id,
+                    dez_anos_atras,
+                    hoje
+                )
 
-# Aplicativo Streamlit
+
+def preprocess_clicks_data_for_range(link_id, link_name, start_date, end_date):
+    """
+    Para um link_id e link_name, extrai os cliques diários no intervalo [start_date, end_date]
+    e retorna um DataFrame com colunas ["Data", link_name].
+    """
+    # Todos os cliques foram obtidos em initialize_session_state (últimos 10 anos). Filtra localmente.
+    all_clicks_data = st.session_state.analytics_data.get(link_id, [])
+    date_range = pd.date_range(start=start_date, end=end_date, freq="D")
+
+    if not all_clicks_data:
+        return pd.DataFrame({"Data": date_range, link_name: 0})
+
+    df = pd.DataFrame(all_clicks_data)
+    df["Data"] = pd.to_datetime(df["t"])
+    df = df.rename(columns={"y": link_name})
+
+    full_df = pd.DataFrame({"Data": date_range})
+    merged = pd.merge(full_df, df[["Data", link_name]], on="Data", how="left")
+    merged[link_name] = merged[link_name].fillna(0)
+
+    return merged
+
+
+# ------------------------------------------------------------------------------
+#                                APLICAÇÃO
+# ------------------------------------------------------------------------------
 def main():
     st.title("Links Rastreados do Linkly")
-    st.write("Este aplicativo exibe a lista de links rastreados do Linkly com análises para um intervalo de datas selecionado.")
 
-    # Inicializa o estado da sessão (busca dados apenas uma vez)
+    # 1) Inicializa o estado da sessão
     initialize_session_state()
 
-    # Verifica se uma página de URL individual deve ser exibida
-    if "selected_link" in st.session_state:
-        render_individual_url_page(st.session_state.selected_link)
-    else:
-        render_main_page()
-
-# Função para renderizar a página principal
-def render_main_page():
-    # Seletor de intervalo de datas
+    # 2) Selecionar intervalo de datas
     col1, col2 = st.columns(2)
     with col1:
         start_date = st.date_input("Data Inicial", datetime.now() - timedelta(days=30))
     with col2:
         end_date = st.date_input("Data Final", datetime.now())
 
-    # Prepara os dados para a tabela
-    table_data = []
+    # 3) Prepara dados para a tabela e armazena séries temporais para cada link
+    table_rows = []
+    link_time_series_map = {}  # nome_do_link -> DataFrame filtrado
+
     for link in st.session_state.tracked_links:
         link_id = link["id"]
         link_name = link["name"]
+        link_url = link["url"]
 
-        # Filtra os cliques para o intervalo de datas selecionado (localmente)
-        clicks_data = st.session_state.analytics_data.get(link_id, [])
-        filtered_clicks = [
-            data_point for data_point in clicks_data
-            if start_date <= datetime.strptime(data_point["t"], "%Y-%m-%d").date() <= end_date
-        ]
-        total_clicks = sum(data_point["y"] for data_point in filtered_clicks)
+        # Filtra os cliques no intervalo selecionado
+        df_filtered = preprocess_clicks_data_for_range(link_id, link_name, start_date, end_date)
+        total_clicks_in_range = df_filtered[link_name].sum()
 
-        table_data.append({
+        link_time_series_map[link_name] = df_filtered  # chave é o nome do link
+
+        table_rows.append({
             "Nome": link_name,
-            "Cliques (Intervalo Selecionado)": total_clicks,
-            "Total de Cliques": link["clicks_count"]
+            "URL": link_url,
+            "Cliques (Intervalo Selecionado)": total_clicks_in_range,
+            "Total de Cliques (Lifetime)": link["clicks_count"]  # obtido da API
         })
 
-    # Converte para DataFrame
-    df = pd.DataFrame(table_data)
+    # 4) Converte em DataFrame e adiciona linha de soma (Total de cliques)
+    df_table = pd.DataFrame(table_rows)
 
-    # Renderiza a tabela
-    st.write("### Links Rastreados")
-    st.dataframe(
-        df,
-        column_config={
-            "Nome": "Nome",
-            "Cliques (Intervalo Selecionado)": "Cliques (Intervalo Selecionado)",
-            "Total de Cliques": "Total de Cliques"
-        },
-        hide_index=True,
-        use_container_width=True
+    sum_of_all_clicks_range = df_table["Cliques (Intervalo Selecionado)"].sum()
+    # Soma dos cliques de todos os links, para exibir como "lifetime"
+    sum_of_all_lifetime_clicks = sum(
+        link.get("clicks_count", 0) for link in st.session_state.tracked_links
     )
 
-    # Adiciona um seletor para nomes de URL e um botão para navegar para a página individual do URL
-    with st.form("url_selector_form"):
-        selected_link_name = st.selectbox(
-            "Selecione um URL para ver detalhes",
-            options=[link["name"] for link in st.session_state.tracked_links]
-        )
-        submit_button = st.form_submit_button("Ver Detalhes")
+    sum_row = {
+        "Nome": "Total de cliques",
+        "URL": "-",
+        "Cliques (Intervalo Selecionado)": sum_of_all_clicks_range,
+        "Total de Cliques (Lifetime)": sum_of_all_lifetime_clicks
+    }
+    df_table = pd.concat([df_table, pd.DataFrame([sum_row])], ignore_index=True)
 
-    # Manipula o envio do formulário
-    if submit_button:
-        selected_link = next(
-            (link for link in st.session_state.tracked_links if link["name"] == selected_link_name),
-            None
-        )
-        if selected_link:
-            st.session_state.selected_link = selected_link["id"]
-            st.rerun()  # Reinicia o aplicativo para renderizar a página individual do URL
+    st.write("### Lista de Links")
 
-def preprocess_clicks_data(clicks_data, start_date, end_date):
-    """
-    Preprocessa os dados de cliques para garantir um intervalo de datas consistente com datas ausentes preenchidas com zero.
-    """
-    # Cria um intervalo de datas da data inicial até a data final
-    date_range = pd.date_range(start=start_date, end=end_date, freq="D")
+    st.dataframe(df_table, hide_index=True, use_container_width=True)
 
-    # Converte os dados de cliques para um DataFrame
-    clicks_df = pd.DataFrame(clicks_data)
+    # 5) Multi-select para plotagem
+    link_names = list(link_time_series_map.keys())
+    plot_options = ["Total de cliques"] + link_names
+    default_selection = ["Total de cliques"]
 
-    # Se não houver dados, retorna um DataFrame com zero cliques para todo o intervalo de datas
-    if clicks_df.empty:
-        return pd.DataFrame({
-            "Data": date_range,
-            "Cliques": 0
-        })
-
-    # Converte a coluna "t" para datetime e renomeia para "Data"
-    clicks_df["Data"] = pd.to_datetime(clicks_df["t"])
-    clicks_df = clicks_df.rename(columns={"y": "Cliques"})
-
-    # Mescla os dados de cliques com o intervalo de datas completo
-    full_df = pd.DataFrame({"Data": date_range})
-    merged_df = pd.merge(full_df, clicks_df[["Data", "Cliques"]], on="Data", how="left")
-
-    # Preenche cliques ausentes com 0
-    merged_df["Cliques"] = merged_df["Cliques"].fillna(0)
-
-    return merged_df
-
-def render_individual_url_page(link_id):
-    st.title("Detalhes do URL Rastreado")
-
-    # Adiciona um dropdown para selecionar um URL diferente
-    selected_link_name = st.selectbox(
-        "Selecione um URL para ver detalhes",
-        options=[link["name"] for link in st.session_state.tracked_links],
-        index=[link["id"] for link in st.session_state.tracked_links].index(link_id)  # Define o link atual como padrão
+    selected_links = st.multiselect(
+        "Selecione os links para plotar:",
+        options=plot_options,
+        default=default_selection
     )
 
-    # Se o usuário selecionar um URL diferente, atualiza o estado da sessão e reinicia o aplicativo
-    if selected_link_name:
-        selected_link = next(
-            (link for link in st.session_state.tracked_links if link["name"] == selected_link_name),
-            None
-        )
-        if selected_link and selected_link["id"] != link_id:
-            st.session_state.selected_link = selected_link["id"]
-            st.rerun()  # Reinicia o aplicativo para atualizar a página com as análises do novo URL
-
-    # Encontra os detalhes do link
-    link = next((link for link in st.session_state.tracked_links if link["id"] == link_id), None)
-    if not link:
-        st.error("Link não encontrado!")
+    if not selected_links:
+        st.info("Selecione ao menos um link para visualizar o gráfico.")
         return
 
-    # Exibe o URL e o nome do link
-    st.write(f"**Nome:** {link['name']}")
-    st.write(f"**URL:** {link['url']}")
+    # 6) Monta o DataFrame final para o gráfico
+    merged_plot_df = pd.DataFrame({"Data": pd.date_range(start=start_date, end=end_date, freq="D")})
+    merged_plot_df.set_index("Data", inplace=True)
 
-    # Seletor de intervalo de datas para a página individual
-    col1, col2 = st.columns(2)
-    with col1:
-        start_date = st.date_input("Data Inicial", datetime.now() - timedelta(days=30), key="individual_start_date")
-    with col2:
-        end_date = st.date_input("Data Final", datetime.now(), key="individual_end_date")
+    def build_sum_of_all_links_df():
+        # Soma em todas as colunas de todos os links do link_time_series_map
+        big_df = pd.DataFrame({"Data": merged_plot_df.index}).reset_index(drop=True)
 
-    # Busca e preprocessa as análises para o intervalo de datas selecionado
-    clicks_data = st.session_state.analytics_data.get(link_id, [])
-    plot_data = preprocess_clicks_data(clicks_data, start_date, end_date)
+        for link_nm in link_time_series_map:
+            big_df = pd.merge(big_df, link_time_series_map[link_nm], on="Data", how="left")
 
-    # Exibe o gráfico de linhas
-    st.write("### Cliques ao Longo do Tempo")
-    st.line_chart(plot_data, x="Data", y="Cliques")
+        numeric_cols = [col for col in big_df.columns if col != "Data"]
+        big_df["Total de cliques"] = big_df[numeric_cols].sum(axis=1)
 
-    # Adiciona um botão "Voltar para a Página Principal"
-    if st.button("Voltar para a Página Principal"):
-        del st.session_state.selected_link  # Limpa o link selecionado
-        st.rerun()  # Reinicia o aplicativo para retornar à página principal
+        return big_df[["Data", "Total de cliques"]]
 
-# Executa o aplicativo Streamlit
+    for sel in selected_links:
+        if sel == "Total de cliques":
+            sum_df = build_sum_of_all_links_df()
+            sum_df.set_index("Data", inplace=True)
+            merged_plot_df = merged_plot_df.join(sum_df, how="left")
+        else:
+            if sel in link_time_series_map:
+                df_to_join = link_time_series_map[sel].copy()
+                df_to_join.set_index("Data", inplace=True)
+                merged_plot_df = merged_plot_df.join(df_to_join, how="left")
+
+    # 7) Exibe o gráfico
+    st.write("### Gráfico de Cliques")
+
+    for col in merged_plot_df.columns:
+        merged_plot_df[col] = merged_plot_df[col].fillna(0)
+
+    st.line_chart(merged_plot_df)
+
+
+# Executa a aplicação
 if __name__ == "__main__":
     main()
