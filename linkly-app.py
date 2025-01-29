@@ -12,6 +12,7 @@ API_KEY = os.getenv("API_KEY")
 WORKSPACE_ID = os.getenv("WORKSPACE_ID")
 BASE_URL = "https://app.linklyhq.com/api/v1"
 
+st.set_page_config(layout="wide")
 
 # ------------------------------------------------------------------------------
 #                               FUNÇÕES DE API
