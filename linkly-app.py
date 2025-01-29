@@ -138,7 +138,6 @@ def main():
 
         table_rows.append({
             "Nome": link_name,
-            "URL": link_url,
             "Cliques (Intervalo Selecionado)": total_clicks_in_range,
             "Total de Cliques (Lifetime)": link["clicks_count"]  # obtido da API
         })
@@ -154,7 +153,6 @@ def main():
 
     sum_row = {
         "Nome": "Total de cliques",
-        "URL": "-",
         "Cliques (Intervalo Selecionado)": sum_of_all_clicks_range,
         "Total de Cliques (Lifetime)": sum_of_all_lifetime_clicks
     }
