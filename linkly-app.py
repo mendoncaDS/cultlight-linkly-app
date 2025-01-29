@@ -1,9 +1,12 @@
-import streamlit as st
-import requests
-import pandas as pd
-from datetime import datetime, timedelta
-import dotenv
 import os
+import dotenv
+import requests
+
+import pandas as pd
+import altair as alt
+import streamlit as st
+
+from datetime import datetime, timedelta
 
 dotenv.load_dotenv()
 
@@ -211,7 +214,21 @@ def main():
     for col in merged_plot_df.columns:
         merged_plot_df[col] = merged_plot_df[col].fillna(0)
 
-    st.line_chart(merged_plot_df)
+    # "merged_plot_df" has an index = "Data", columns = link names (possibly with special chars)
+    chart_data = merged_plot_df.reset_index().melt('Data', var_name='Link', value_name='Cliques')
+
+    chart = (
+        alt.Chart(chart_data)
+        .mark_line()
+        .encode(
+        x='Data:T',
+        y='Cliques:Q',
+        color='Link:N'  # Altair can handle special chars in the legend
+        )
+        .properties(width='container', height=400)
+    )
+
+    st.altair_chart(chart, use_container_width=True)
 
 
 # Executa a aplicação
